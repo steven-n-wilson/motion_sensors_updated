@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'motion_sensors_updated'
-  s.version          = '0.0.1'
+#  s.version          = '0.0.1'
   s.summary          = 'Flutter plugin for accessing the Android and iOS accelerometer, gyroscope, magnetometer, and orientation sensors.'
   s.description      = <<-DESC
                        Flutter plugin for accessing the Android and iOS accelerometer, gyroscope, magnetometer, and orientation sensors.
