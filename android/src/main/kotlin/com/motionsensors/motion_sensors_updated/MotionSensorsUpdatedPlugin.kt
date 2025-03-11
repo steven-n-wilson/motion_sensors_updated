@@ -14,80 +14,20 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
-/** MotionSensorsUpdatedPlugin */
-class MotionSensorsUpdatedPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
-    private lateinit var sensorManager: SensorManager
-    private lateinit var methodChannel: MethodChannel
-    private lateinit var context: Context
-    private lateinit var screenOrientationHandler: ScreenOrientationHandler
-
-    private val sensors = mutableMapOf<String, SensorHandler>()
-
-    override fun onAttachedToEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
-        context = binding.applicationContext
-        sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        methodChannel = MethodChannel(binding.binaryMessenger, "motion_sensors/method")
-        methodChannel.setMethodCallHandler(this)
-
-        setupEventChannels(binding.binaryMessenger)
-    }
-
-    private fun setupEventChannels(messenger: BinaryMessenger) {
-        val sensorTypes = mapOf(
-            "accelerometer" to Sensor.TYPE_ACCELEROMETER,
-            "gyroscope" to Sensor.TYPE_GYROSCOPE,
-            "magnetometer" to Sensor.TYPE_MAGNETIC_FIELD,
-            "user_accelerometer" to Sensor.TYPE_LINEAR_ACCELERATION,
-            "orientation" to Sensor.TYPE_GAME_ROTATION_VECTOR,
-            "absolute_orientation" to Sensor.TYPE_ROTATION_VECTOR,
-            "screen_orientation" to Sensor.TYPE_ROTATION_VECTOR  // Using rotation vector for consistency
-        )
-
-        sensorTypes.forEach { (name, type) ->
-            val channelName = "motion_sensors/$name"
-            val eventChannel = EventChannel(messenger, channelName)
-            val sensor = sensorManager.getDefaultSensor(type)
-            val handler = if (name == "screen_orientation") {
-                ScreenOrientationHandler(context, sensorManager).also { screenOrientationHandler = it }
-            } else {
-                SensorHandler(sensorManager, sensor)
-            }
-            eventChannel.setStreamHandler(handler)
-            sensors[name] = handler
-        }
-    }
-
-    override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
-        methodChannel.setMethodCallHandler(null)
-        sensors.values.forEach { it.teardown() }
-        sensors.clear()
-    }
-
-    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        when (call.method) {
-            "isSensorAvailable" -> {
-                val sensorType = call.argument<String>("sensorType")
-                result.success(sensors[sensorType]?.isSensorAvailable())
-            }
-            "setSensorUpdateInterval" -> {
-                val sensorType = call.argument<String>("sensorType")
-                val interval = call.argument<Int>("interval") ?: SensorManager.SENSOR_DELAY_NORMAL
-                sensors[sensorType]?.setUpdateInterval(interval)
-                result.success(null)
-            }
-            else -> result.notImplemented()
-        }
-    }
+/** Defines a common interface for sensor event handling and channel streaming. */
+interface SensorEventListenerHandler : EventChannel.StreamHandler, SensorEventListener {
+    fun setUpdateInterval(interval: Int)
+    fun isSensorAvailable(): Boolean
+    fun teardown()
 }
 
-class SensorHandler(private val sensorManager: SensorManager, private val sensor: Sensor?) : EventChannel.StreamHandler, SensorEventListener {
+/** Handles specific sensor data and provides data through an EventChannel. */
+class SensorHandler(private val sensorManager: SensorManager, private val sensor: Sensor?) : SensorEventListenerHandler {
     private var eventSink: EventChannel.EventSink? = null
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
-        sensor?.also {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
-        }
+        sensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
     }
 
     override fun onCancel(arguments: Any?) {
@@ -100,35 +40,29 @@ class SensorHandler(private val sensorManager: SensorManager, private val sensor
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
-        event?.values?.let {
-            eventSink?.success(it.toList())
-        }
+        event?.values?.let { eventSink?.success(it.toList()) }
     }
 
-    fun isSensorAvailable(): Boolean = sensor != null
+    override fun isSensorAvailable(): Boolean = sensor != null
 
-    fun setUpdateInterval(interval: Int) {
-        if (sensor != null) {
-            sensorManager.unregisterListener(this)
-            sensorManager.registerListener(this, sensor, interval)
-        }
+    override fun setUpdateInterval(interval: Int) {
+        sensor?.let { sensorManager.registerListener(this, it, interval) }
     }
 
-    fun teardown() {
+    override fun teardown() {
         sensorManager.unregisterListener(this)
     }
 }
 
-class ScreenOrientationHandler(private val context: Context, private val sensorManager: SensorManager) : EventChannel.StreamHandler, SensorEventListener {
+/** Handles screen orientation changes and provides updates through an EventChannel. */
+class ScreenOrientationHandler(private val context: Context, private val sensorManager: SensorManager) : SensorEventListenerHandler {
     private var eventSink: EventChannel.EventSink? = null
     private var lastRotation: Double = -1.0
+    private val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
-        val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-        sensor?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
-        }
+        sensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
     }
 
     override fun onCancel(arguments: Any?) {
@@ -156,6 +90,81 @@ class ScreenOrientationHandler(private val context: Context, private val sensorM
             Surface.ROTATION_180 -> 180.0
             Surface.ROTATION_270 -> 270.0
             else -> 0.0
+        }
+    }
+
+    override fun setUpdateInterval(interval: Int) {
+        sensor?.let { sensorManager.registerListener(this, it, interval) }
+    }
+
+    override fun isSensorAvailable(): Boolean = sensor != null
+
+    override fun teardown() {
+        sensorManager.unregisterListener(this)
+    }
+}
+
+/** Main plugin class implementing FlutterPlugin. */
+class MotionSensorsUpdatedPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
+    private lateinit var sensorManager: SensorManager
+    private lateinit var methodChannel: MethodChannel
+    private lateinit var context: Context
+
+    private val sensors = mutableMapOf<String, SensorEventListenerHandler>()
+
+    override fun onAttachedToEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
+        context = binding.applicationContext
+        sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        methodChannel = MethodChannel(binding.binaryMessenger, "motion_sensors/method")
+        methodChannel.setMethodCallHandler(this)
+
+        setupEventChannels(binding.binaryMessenger)
+    }
+
+    private fun setupEventChannels(messenger: BinaryMessenger) {
+        val sensorTypes = mapOf(
+            "accelerometer" to Sensor.TYPE_ACCELEROMETER,
+            "gyroscope" to Sensor.TYPE_GYROSCOPE,
+            "magnetometer" to Sensor.TYPE_MAGNETIC_FIELD,
+            "user_accelerometer" to Sensor.TYPE_LINEAR_ACCELERATION,
+            "orientation" to Sensor.TYPE_GAME_ROTATION_VECTOR,
+            "absolute_orientation" to Sensor.TYPE_ROTATION_VECTOR,
+            "screen_orientation" to Sensor.TYPE_ROTATION_VECTOR  // Using rotation vector for consistency
+        )
+
+        sensorTypes.forEach { (name, type) ->
+            val channelName = "motion_sensors/$name"
+            val eventChannel = EventChannel(messenger, channelName)
+            val sensor = sensorManager.getDefaultSensor(type)
+            val handler = if (name == "screen_orientation") {
+                ScreenOrientationHandler(context, sensorManager)
+            } else {
+                SensorHandler(sensorManager, sensor)
+            }
+            eventChannel.setStreamHandler(handler)
+            sensors[name] = handler
+        }
+    }
+
+    override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
+        methodChannel.setMethodCallHandler(null)
+        sensors.values.forEach { it.teardown() }
+        sensors.clear()
+    }
+
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        when (call.method) {
+            "isSensorAvailable" -> {
+                val sensorType = call.argument<String>("sensorType")
+                result.success(sensors[sensorType]?.isSensorAvailable())
+            }
+            "setSensorUpdateInterval" -> {
+                val sensorType = call.argument<String>("sensorType")
+                val interval = call.argument<Int>("interval") ?: SensorManager.SENSOR_DELAY_NORMAL
+                sensors[sensorType]?.setUpdateInterval(interval)
+                result.success(null)
+            }
+            else -> result.notImplemented()
         }
     }
 }
